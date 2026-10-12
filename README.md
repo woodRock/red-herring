@@ -1,5 +1,10 @@
 # red-herring
 
+[![CI](https://github.com/woodRock/red-herring/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/woodRock/red-herring/actions/workflows/ci.yml)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
+[![Coverage ≥ 90%](https://img.shields.io/badge/coverage-%E2%89%A590%25-brightgreen.svg)](.github/workflows/ci.yml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 Open-set detection and calibrated uncertainty for GC-MS fish species authentication.
 
 Real fraud often involves a species that isn't in the training set, and a closed-set
@@ -60,3 +65,15 @@ uv run red-herring --models lr cnn --seeds 1 --epochs 20 --out results/quick
 First run parses the raw text (~20 s) and caches to `data/processed/chroma.npz`.
 Results go to `results/`: `metrics.csv` (long format), `summary.csv`
 (mean ± std), `predictions.csv.gz` (per-sample probabilities and scores for figures).
+
+## Development
+
+```bash
+uv sync                      # install with dev tools
+uv run pytest                # tests + coverage report (fails under 90%)
+uv run ruff check src tests  # lint
+uv run ruff format src tests # format
+```
+
+Tests use only synthetic data (generated chromatograms and miniature Xcalibur text
+files), so they run without the private dataset.

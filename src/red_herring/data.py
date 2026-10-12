@@ -20,19 +20,19 @@ relabelled 0..K-1 and held-out species get label -1 (see `open_set_split`).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
-dir_path = Path("data/raw-subsetted-CVSs")
-data_directories = ["BCO4", "GUR2", "SNA1", "TAR"]
+DATA_DIR = Path("data/raw-subsetted-CVSs")
+DATA_DIRECTORIES = ("BCO4", "GUR2", "SNA1", "TAR")
 
 MZ_MAX = 1000
 N_BINS = 200
 RT_RANGE = (5.0, 45.0)  # minutes; common to every run
 
-SPECIES = ["SNA", "GUR", "TAR", "BCO"]
+SPECIES = ("SNA", "GUR", "TAR", "BCO")
 SPECIES_LABEL = {s: i for i, s in enumerate(SPECIES)}
 UNKNOWN = -1
 
@@ -45,10 +45,10 @@ _TISSUE_ALIASES = {"ROG": "Rest of Guts"}
 
 @dataclass
 class SpectraData:
-    X: np.ndarray                 # [N, n_bins, MZ_MAX] float32
-    y: np.ndarray                 # [N] int64 species label (UNKNOWN for open-set held out)
-    individuals: list[str]        # biological individual, e.g. "BCO4" — use as CV groups
-    tissues: list[str]            # body part, e.g. "Rest of Guts"
+    X: np.ndarray  # [N, n_bins, MZ_MAX] float32
+    y: np.ndarray  # [N] int64 species label (UNKNOWN for open-set held out)
+    individuals: list[str]  # biological individual, e.g. "BCO4"
+    tissues: list[str]  # body part, e.g. "Rest of Guts"
     sample_ids: list[str]
     classes: list[str] = field(default_factory=lambda: list(SPECIES))
 
@@ -59,8 +59,13 @@ class SpectraData:
     def species(self) -> list[str]:
         return [self.classes[c] if c != UNKNOWN else "unknown" for c in self.y]
 
+    @property
+    def groups(self) -> np.ndarray:
+        """Individual + tissue: technical replicates share a group."""
+        return np.array([f"{i}|{t}" for i, t in zip(self.individuals, self.tissues, strict=True)])
 
-def _sqrt_l2(arr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+
+def sqrt_l2(arr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     arr = np.sqrt(np.maximum(arr, 0.0))
     norms = np.linalg.norm(arr, axis=-1, keepdims=True)
     return arr / (norms + eps)
@@ -79,13 +84,13 @@ def read_scans(file_path: Path) -> tuple[np.ndarray, np.ndarray]:
 
     scans = list(_SCAN_RE.finditer(text))
     rt = np.array([float(m.group(1)) for m in scans], dtype=np.float32)
-    scan_starts = np.array([m.start() for m in scans])
+    spectra = np.zeros((len(scans), MZ_MAX), dtype=np.float32)
 
     peaks = list(_PEAK_RE.finditer(text))
-    spectra = np.zeros((len(scans), MZ_MAX), dtype=np.float32)
     if not peaks:
         return rt, spectra
 
+    scan_starts = np.array([m.start() for m in scans])
     peak_pos = np.array([m.start() for m in peaks])
     intensity = np.array([float(m.group(1)) for m in peaks], dtype=np.float32)
     mz = np.rint([float(m.group(2)) for m in peaks]).astype(np.int64)
@@ -96,13 +101,13 @@ def read_scans(file_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return rt, spectra
 
 
-def _bin_chromatogram(
+def bin_chromatogram(
     rt: np.ndarray, spectra: np.ndarray, n_bins: int, rt_range: tuple[float, float]
 ) -> np.ndarray:
     """
     Divide rt_range into n_bins equal windows; keep the highest-TIC scan per window.
 
-    Returns [n_bins, MZ_MAX] — zero rows where the window has no signal.
+    Returns [n_bins, mz] — zero rows where the window has no scans.
     """
     rt_min, rt_max = rt_range
     tic = spectra.sum(axis=1)
@@ -111,10 +116,8 @@ def _bin_chromatogram(
     result = np.zeros((n_bins, spectra.shape[1]), dtype=np.float32)
     for i in range(n_bins):
         in_bin = np.flatnonzero(bin_idx == i)
-        if len(in_bin) == 0:
-            continue
-        best = in_bin[np.argmax(tic[in_bin])]
-        result[i] = spectra[best]
+        if len(in_bin):
+            result[i] = spectra[in_bin[np.argmax(tic[in_bin])]]
     return result
 
 
@@ -122,8 +125,7 @@ def process_file(
     file_path: Path, n_bins: int = N_BINS, rt_range: tuple[float, float] = RT_RANGE
 ) -> np.ndarray:
     rt, spectra = read_scans(file_path)
-    chroma = _bin_chromatogram(rt, spectra, n_bins, rt_range)  # [n_bins, MZ_MAX]
-    return _sqrt_l2(chroma)                                     # normalise each bin
+    return sqrt_l2(bin_chromatogram(rt, spectra, n_bins, rt_range))
 
 
 def parse_filename(name: str) -> tuple[str, str, str] | None:
@@ -131,16 +133,16 @@ def parse_filename(name: str) -> tuple[str, str, str] | None:
     m = _FNAME_RE.match(name)
     if m is None:
         return None
-    species, number, rest = m.group(1).upper(), m.group(2), m.group(3).split()
+    species, number, words = m.group(1).upper(), m.group(2), m.group(3).split()
     # Trailing replicate marker: "A", "B", "C", or "2" (SNA1 Head 2).
-    if len(rest) > 1 and len(rest[-1]) == 1:
-        rest = rest[:-1]
-    tissue = " ".join(rest)
+    if len(words) > 1 and len(words[-1]) == 1:
+        words = words[:-1]
+    tissue = " ".join(words)
     return species, f"{species}{number}", _TISSUE_ALIASES.get(tissue, tissue)
 
 
 def load_raw(
-    path: str | Path = dir_path,
+    path: str | Path = DATA_DIR,
     n_bins: int = N_BINS,
     rt_range: tuple[float, float] = RT_RANGE,
     cache: str | Path | None = None,
@@ -152,25 +154,20 @@ def load_raw(
     to save the result on first run and reload it afterwards.
     """
     if cache is not None and Path(cache).exists():
-        return _load_cache(Path(cache))
+        return load_cache(Path(cache))
 
-    root = Path(path)
     X, y, individuals, tissues, sample_ids = [], [], [], [], []
-    for directory in sorted(root.iterdir()):
-        if not (directory.is_dir() and directory.name in data_directories):
+    for file_path in _sample_files(Path(path)):
+        parsed = parse_filename(file_path.name)
+        if parsed is None:
+            print(f"Skipping unrecognised file: {file_path}")
             continue
-        # Not recursive: skips .ipynb_checkpoints duplicates.
-        for file_path in sorted(directory.glob("*.txt")):
-            parsed = parse_filename(file_path.name)
-            if parsed is None:
-                print(f"Skipping unrecognised file: {file_path}")
-                continue
-            species, individual, tissue = parsed
-            X.append(process_file(file_path, n_bins, rt_range))
-            y.append(SPECIES_LABEL[species])
-            individuals.append(individual)
-            tissues.append(tissue)
-            sample_ids.append(file_path.stem)
+        species, individual, tissue = parsed
+        X.append(process_file(file_path, n_bins, rt_range))
+        y.append(SPECIES_LABEL[species])
+        individuals.append(individual)
+        tissues.append(tissue)
+        sample_ids.append(file_path.stem)
 
     data = SpectraData(
         X=np.stack(X),
@@ -180,32 +177,35 @@ def load_raw(
         sample_ids=sample_ids,
     )
     if cache is not None:
-        _save_cache(data, Path(cache))
+        save_cache(data, Path(cache))
     return data
+
+
+def _sample_files(root: Path) -> list[Path]:
+    """Top-level .txt files of each species directory; skips .ipynb_checkpoints."""
+    return [
+        file_path
+        for directory in sorted(root.iterdir())
+        if directory.is_dir() and directory.name in DATA_DIRECTORIES
+        for file_path in sorted(directory.glob("*.txt"))
+    ]
 
 
 def open_set_split(data: SpectraData, unknown: list[str]) -> SpectraData:
     """
     Hold out `unknown` species: they are labelled UNKNOWN (-1), and the
-    remaining known species are relabelled 0..K-1 in SPECIES order.
+    remaining known species are relabelled 0..K-1 in their original order.
     """
-    unknown = {s.upper() for s in unknown}
-    if not unknown <= set(data.classes):
-        raise ValueError(f"Unknown species must be drawn from {data.classes}, got {sorted(unknown)}")
-    known = [s for s in data.classes if s not in unknown]
+    unknown_set = {s.upper() for s in unknown}
+    if not unknown_set <= set(data.classes):
+        raise ValueError(f"Unknown species must be drawn from {data.classes}, got {unknown}")
+    known = [s for s in data.classes if s not in unknown_set]
     remap = {data.classes.index(s): i for i, s in enumerate(known)}
     y = np.array([remap.get(int(c), UNKNOWN) for c in data.y], dtype=np.int64)
-    return SpectraData(
-        X=data.X,
-        y=y,
-        individuals=data.individuals,
-        tissues=data.tissues,
-        sample_ids=data.sample_ids,
-        classes=known,
-    )
+    return replace(data, y=y, classes=known)
 
 
-def _save_cache(data: SpectraData, path: Path) -> None:
+def save_cache(data: SpectraData, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -218,13 +218,13 @@ def _save_cache(data: SpectraData, path: Path) -> None:
     )
 
 
-def _load_cache(path: Path) -> SpectraData:
-    f = np.load(path)
-    return SpectraData(
-        X=f["X"],
-        y=f["y"],
-        individuals=f["individuals"].tolist(),
-        tissues=f["tissues"].tolist(),
-        sample_ids=f["sample_ids"].tolist(),
-        classes=f["classes"].tolist(),
-    )
+def load_cache(path: Path) -> SpectraData:
+    with np.load(path) as f:
+        return SpectraData(
+            X=f["X"],
+            y=f["y"],
+            individuals=f["individuals"].tolist(),
+            tissues=f["tissues"].tolist(),
+            sample_ids=f["sample_ids"].tolist(),
+            classes=f["classes"].tolist(),
+        )

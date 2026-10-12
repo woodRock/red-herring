@@ -10,11 +10,14 @@ so the open-set and conformal machinery is shared with the deep model.
 from __future__ import annotations
 
 import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+
+FEATURES = ("mean", "max")
 
 
 def project(X: np.ndarray, feature: str) -> np.ndarray:
@@ -23,28 +26,37 @@ def project(X: np.ndarray, feature: str) -> np.ndarray:
         return X.mean(axis=1)
     if feature == "max":
         return X.max(axis=1)
-    raise ValueError(f"Unknown feature {feature!r}")
+    raise ValueError(f"Unknown feature {feature!r}; expected one of {FEATURES}")
 
 
-class PCALogReg:
+class _ProjectionModel:
+    def __init__(self, seed: int = 0, feature: str = "mean") -> None:
+        self.seed = seed
+        self.feature = feature
+
+    def _features(self, X: np.ndarray) -> np.ndarray:
+        return project(X, self.feature)
+
+
+class PCALogReg(_ProjectionModel):
     """Standardise → PCA → multinomial logistic regression; PCA space is the embedding."""
 
-    def __init__(self, n_components: int = 20, seed: int = 0, feature: str = "mean") -> None:
+    def __init__(self, seed: int = 0, feature: str = "mean", n_components: int = 20) -> None:
+        super().__init__(seed, feature)
         self.n_components = n_components
-        self.feature = feature
-        self.seed = seed
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "PCALogReg":
-        F = project(X, self.feature)
+    def fit(self, X: np.ndarray, y: np.ndarray) -> PCALogReg:
+        F = self._features(X)
         self.scaler = StandardScaler().fit(F)
-        n_comp = min(self.n_components, len(F) - 1)
-        self.pca = PCA(n_components=n_comp, random_state=self.seed).fit(self.scaler.transform(F))
-        self.clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=5000)
+        n_components = min(self.n_components, len(F) - 1)
+        self.pca = PCA(n_components=n_components, random_state=self.seed)
+        self.pca.fit(self.scaler.transform(F))
+        self.clf = LogisticRegression(class_weight="balanced", max_iter=5000)
         self.clf.fit(self._embed(X), y)
         return self
 
     def _embed(self, X: np.ndarray) -> np.ndarray:
-        return self.pca.transform(self.scaler.transform(project(X, self.feature)))
+        return self.pca.transform(self.scaler.transform(self._features(X)))
 
     def outputs(self, X: np.ndarray) -> dict:
         emb = self._embed(X)
@@ -55,38 +67,32 @@ class PCALogReg:
         }
 
 
-class SVMRBF:
+class SVMRBF(_ProjectionModel):
     """Standardise → RBF SVM with Platt-scaled probabilities."""
 
-    def __init__(self, seed: int = 0, feature: str = "mean") -> None:
-        self.seed = seed
-        self.feature = feature
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "SVMRBF":
-        F = project(X, self.feature)
+    def fit(self, X: np.ndarray, y: np.ndarray) -> SVMRBF:
+        F = self._features(X)
         self.scaler = StandardScaler().fit(F)
-        self.clf = SVC(kernel="rbf", C=10.0, gamma="scale", probability=True,
-                       class_weight="balanced", random_state=self.seed)
+        svm = SVC(kernel="rbf", C=10.0, gamma="scale", class_weight="balanced")
+        # Platt scaling on out-of-fold decision values, then one SVM refit on all data.
+        self.clf = CalibratedClassifierCV(svm, method="sigmoid", cv=3, ensemble=False)
         self.clf.fit(self.scaler.transform(F), y)
         return self
 
     def outputs(self, X: np.ndarray) -> dict:
-        return {"probs": self.clf.predict_proba(self.scaler.transform(project(X, self.feature)))}
+        return {"probs": self.clf.predict_proba(self.scaler.transform(self._features(X)))}
 
 
-class RandomForest:
-    def __init__(self, seed: int = 0, feature: str = "mean") -> None:
-        self.seed = seed
-        self.feature = feature
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "RandomForest":
-        self.clf = RandomForestClassifier(n_estimators=500, class_weight="balanced",
-                                          random_state=self.seed, n_jobs=-1)
-        self.clf.fit(project(X, self.feature), y)
+class RandomForest(_ProjectionModel):
+    def fit(self, X: np.ndarray, y: np.ndarray) -> RandomForest:
+        self.clf = RandomForestClassifier(
+            n_estimators=500, class_weight="balanced", random_state=self.seed, n_jobs=-1
+        )
+        self.clf.fit(self._features(X), y)
         return self
 
     def outputs(self, X: np.ndarray) -> dict:
-        return {"probs": self.clf.predict_proba(project(X, self.feature))}
+        return {"probs": self.clf.predict_proba(self._features(X))}
 
 
 BASELINES = {"lr": PCALogReg, "svm": SVMRBF, "rf": RandomForest}

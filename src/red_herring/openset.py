@@ -40,7 +40,7 @@ def mahalanobis_score(train_emb: np.ndarray, train_y: np.ndarray, emb: np.ndarra
     means = np.stack([train_emb[train_y == c].mean(axis=0) for c in classes])
     centred = train_emb - means[np.searchsorted(classes, train_y)]
     precision = LedoitWolf().fit(centred).precision_
-    diff = emb[:, None, :] - means[None, :, :]                       # [N, K, d]
+    diff = emb[:, None, :] - means[None, :, :]  # [N, K, d]
     d2 = np.einsum("nkd,de,nke->nk", diff, precision, diff)
     return d2.min(axis=1)
 

@@ -20,12 +20,12 @@ import numpy as np
 
 
 def conformal_quantile(cal_scores: np.ndarray, alpha: float) -> float:
-    """Finite-sample-corrected (1 - α) quantile; inf when n is too small for α."""
+    """The ⌈(n+1)(1-α)⌉-th smallest score; inf when n is too small for α."""
     n = len(cal_scores)
-    level = np.ceil((n + 1) * (1 - alpha)) / n
-    if n == 0 or level > 1:
+    rank = int(np.ceil((n + 1) * (1 - alpha)))
+    if rank > n:
         return np.inf
-    return float(np.quantile(cal_scores, level, method="higher"))
+    return float(np.sort(cal_scores)[rank - 1])
 
 
 def lac_scores(probs: np.ndarray) -> np.ndarray:
